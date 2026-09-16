@@ -1,5 +1,12 @@
-export type MissionStatus = "queued" | "planning" | "running" | "waiting_approval" | "verifying" | "completed" | "failed";
+export type MissionStatus = "queued" | "planning" | "running" | "waiting_approval" | "verifying" | "synthesizing" | "completed" | "failed";
 export type StepStatus = "pending" | "running" | "completed" | "failed";
+
+export interface MissionSynthesis {
+  summary: string;
+  findings: string[];
+  recommendations: string[];
+  nextAction: string;
+}
 
 export interface Mission {
   id: string;
@@ -9,6 +16,7 @@ export interface Mission {
   createdAt: string;
   updatedAt: string;
   result?: string;
+  synthesis?: MissionSynthesis;
   error?: string;
 }
 
@@ -43,6 +51,8 @@ export interface Event {
     | "agent.decision"
     | "approval.required"
     | "step.completed"
+    | "mission.synthesizing"
+    | "mission.synthesized"
     | "mission.completed"
     | "mission.failed";
   timestamp: string;
