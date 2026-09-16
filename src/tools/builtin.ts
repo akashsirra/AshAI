@@ -41,15 +41,12 @@ async function collectFiles(workspace: string, requested: string, max: number): 
 }
 
 export const workspaceInspect: ToolDefinition = {
-  name: "workspace.inspect", description: "Inspect a file or directory in the mission workspace. File paths return metadata; directory paths return entries.",
+  name: "workspace.inspect", description: "Inspect files and directories in the mission workspace.",
   async execute(input, context) {
-    const value = objectInput(input); const requested = stringField(value, "path", "file", "filePath", "directory", "dir") ?? "."; const target = safePath(context.workspace, requested);
-    let info;
-    try { info = await stat(target); } catch { throw new Error(`Path not found: ${requested}`); }
-    if (info.isFile()) return { path: requested, type: "file", size: info.size, modifiedAt: info.mtime.toISOString() };
-    if (!info.isDirectory()) return { path: requested, type: "other" };
-    const entries = await readdir(target, { withFileTypes: true });
-    return { path: requested, type: "directory", entries: entries.slice(0, 200).map(entry => ({ name: entry.name, type: entry.isDirectory() ? "directory" : "file" })) };
+    const value = objectInput(input); const requested = stringField(value, "path", "directory", "dir") ?? "."; const target = safePath(context.workspace, requested); const info = await stat(target);
+    if (info.isFile()) return { path: requested, type: "file", size: info.size };
+    if (!info.isDirectory()) throw new Error(`Unsupported filesystem entry: ${requested}`);
+    const entries = await readdir(target, { withFileTypes: true }); return entries.slice(0, 200).map(entry => ({ name: entry.name, type: entry.isDirectory() ? "directory" : "file" }));
   },
 };
 
@@ -64,7 +61,7 @@ export const workspaceReadFile: ToolDefinition = {
     const value = objectInput(input); const requested = stringField(value, "path", "file", "filePath") ?? "README.md"; const target = safePath(context.workspace, requested);
     if (await pathExists(target)) { const info = await stat(target); if (!info.isFile()) throw new Error(`Not a file: ${requested}`); return await readFile(target, "utf8"); }
     const wanted = basename(requested); const candidates = (await collectFiles(context.workspace, ".", 1000)).files.filter(path => basename(path) === wanted);
-    if (candidates.length === 1) return `Resolved requested path '${requested}' to '${candidates[0]}'.\n\n${await readFile(safePath(context.workspace, candidates[0]), "utf8")}`;
+    if (candidates.length === 1) { const candidate = candidates[0]!; return `Resolved requested path '${requested}' to '${candidate}'.\n\n${await readFile(safePath(context.workspace, candidate), "utf8")}`; }
     if (candidates.length > 1) throw new Error(`File not found: ${requested}; basename '${wanted}' matched multiple files: ${candidates.slice(0, 10).join(", ")}`);
     throw new Error(`File not found: ${requested}`);
   },
