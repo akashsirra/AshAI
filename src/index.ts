@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { GroqProvider } from "./core/groq-provider.js";
-import { MissionRuntime } from "./core/mission-runtime.js";
+import { MissionRuntime } from "./core/mission-runtime-v2.js";
 import { ToolRegistry } from "./core/tool-registry.js";
 import { workspaceExecute, workspaceInspect, workspaceReadFile, workspaceVerify, workspaceWriteFile } from "./tools/builtin.js";
 
