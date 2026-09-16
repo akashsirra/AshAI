@@ -43,18 +43,10 @@ export interface Event {
   id: string;
   missionId: string;
   type:
-    | "mission.created"
-    | "plan.created"
-    | "step.started"
-    | "tool.called"
-    | "tool.completed"
-    | "agent.decision"
-    | "approval.required"
-    | "step.completed"
-    | "mission.synthesizing"
-    | "mission.synthesized"
-    | "mission.completed"
-    | "mission.failed";
+    | "mission.created" | "plan.created" | "step.started" | "tool.called" | "tool.completed"
+    | "agent.decision" | "approval.required" | "approval.granted" | "step.completed" | "step.failed"
+    | "mission.verifying" | "mission.synthesizing" | "mission.synthesized" | "mission.retrying"
+    | "mission.completed" | "mission.failed";
   timestamp: string;
   data: Record<string, unknown>;
 }
