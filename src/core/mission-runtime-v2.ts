@@ -18,10 +18,14 @@ export class MissionRuntime {
     const mission: Mission = { id: randomUUID(), goal: goal.trim(), status: "planning", plan: [], createdAt: now, updatedAt: now };
     this.missions.set(mission.id, mission); this.events.set(mission.id, []);
     await this.persist(mission); await this.emit(mission.id, "mission.created", { goal: mission.goal });
-    mission.plan = this.provider ? await this.provider.plan(mission.goal) : createPlan(mission.goal);
-    if (!mission.plan.length) throw new Error("Mission planner returned an empty plan.");
-    await this.emit(mission.id, "plan.created", { steps: mission.plan.length, planner: this.provider ? "model" : "deterministic" });
-    await this.persist(mission); return mission;
+    try {
+      mission.plan = this.provider ? await this.provider.plan(mission.goal) : createPlan(mission.goal);
+      if (!mission.plan.length) throw new Error("Mission planner returned an empty plan.");
+      await this.emit(mission.id, "plan.created", { steps: mission.plan.length, planner: this.provider ? "model" : "deterministic" });
+      await this.persist(mission); return mission;
+    } catch (error) {
+      mission.status = "failed"; mission.error = error instanceof Error ? error.message : String(error); await this.persist(mission); await this.emit(mission.id, "mission.failed", { error: mission.error }); throw error;
+    }
   }
 
   async hydrate(id: string): Promise<Mission> {
@@ -37,7 +41,9 @@ export class MissionRuntime {
   async approve(id: string): Promise<Mission> {
     const mission = await this.hydrate(id);
     if (mission.status !== "waiting_approval") throw new Error("Mission is not waiting for approval.");
-    this.approved.add(id); mission.error = undefined; await this.emit(id, "approval.granted", { missionId: id }); await this.persist(mission); return mission;
+    this.approved.add(id); mission.error = undefined;
+    for (const step of mission.plan) if (step.status === "running") step.status = "pending";
+    await this.emit(id, "approval.granted", { missionId: id }); await this.persist(mission); return mission;
   }
 
   async run(id: string, workspace = process.cwd()): Promise<Mission> {
@@ -45,28 +51,44 @@ export class MissionRuntime {
     if (mission.status === "completed") return mission;
     mission.status = "running"; mission.error = undefined; await this.persist(mission);
     const toolResults: Record<string, unknown> = {};
+    const signatures = new Set<string>();
+    const maxSteps = Math.max(1, Number(process.env.ASHAI_MAX_AGENT_STEPS ?? 24));
+    let executed = 0;
     try {
-      for (const step of mission.plan) {
-        if (step.status === "completed") continue;
-        try { toolResults[step.id] = await this.runStep(mission, step, workspace); }
+      for (let index = 0; index < mission.plan.length && executed < maxSteps; index += 1) {
+        const step = mission.plan[index];
+        if (!step || step.status === "completed") continue;
+        try { step.attempts = (step.attempts ?? 0) + 1; toolResults[step.id] = await this.runStep(mission, step, workspace); executed += 1; }
         catch (error) {
-          if (this.getMission(id).status === "waiting_approval") { await this.persist(mission); return mission; }
-          toolResults[step.id] = { error: error instanceof Error ? error.message : String(error), status: "failed" };
-          // Preserve evidence and continue so synthesis can explain the failure rather than hiding it.
+          if (mission.status === "waiting_approval") { await this.persist(mission); return mission; }
+          toolResults[step.id] = { error: error instanceof Error ? error.message : String(error), status: "failed" }; executed += 1;
+        }
+        if (this.provider && process.env.ASHAI_AGENT_LOOP !== "false" && mission.status === "running") {
+          const decision = await this.provider.decide({ goal: mission.goal, step, toolResult: toolResults[step.id] });
+          await this.emit(id, "agent.decision", { stepId: step.id, decision });
+          if (decision.action === "ask_approval") { mission.status = "waiting_approval"; await this.persist(mission); return mission; }
+          if (decision.action === "call_tool" && decision.tool) {
+            const signature = `${decision.tool}:${JSON.stringify(decision.input ?? {})}`;
+            if (!signatures.has(signature)) {
+              signatures.add(signature);
+              mission.plan.splice(index + 1, 0, { id: `agent-${randomUUID()}`, title: decision.summary || `Agent follow-up: ${decision.tool}`, description: decision.summary || `Agent-selected follow-up using ${decision.tool}.`, status: "pending", tool: decision.tool, input: decision.input, requiresApproval: decision.tool === "workspace.write_file" });
+              await this.persist(mission);
+            }
+          }
         }
       }
+      if (executed >= maxSteps && mission.plan.some(step => step.status === "pending")) mission.error = `Agent step limit reached (${maxSteps}).`;
       mission.status = "verifying"; await this.persist(mission); await this.emit(id, "mission.verifying", { steps: mission.plan.length });
       mission.status = "synthesizing"; await this.persist(mission); await this.emit(id, "mission.synthesizing", { steps: mission.plan.length });
       mission.synthesis = this.provider ? await this.provider.synthesize({ goal: mission.goal, steps: mission.plan, toolResults: this.limitToolResults(toolResults) }) : this.fallbackSynthesis(mission);
-      mission.synthesis = this.cleanSynthesis(mission.synthesis);
-      mission.result = this.formatSynthesis(mission.synthesis);
+      mission.synthesis = this.cleanSynthesis(mission.synthesis); mission.result = this.formatSynthesis(mission.synthesis);
       await this.emit(id, "mission.synthesized", { synthesis: mission.synthesis });
-      mission.status = mission.plan.some(step => step.status === "failed") ? "failed" : "completed";
-      if (mission.status === "failed") mission.error = "One or more mission steps failed; see evidence and timeline.";
+      const incomplete = mission.plan.some(step => step.status === "pending" || step.status === "running"); const failed = mission.plan.some(step => step.status === "failed");
+      mission.status = failed || incomplete ? "failed" : "completed";
+      if (mission.status === "failed" && !mission.error) mission.error = failed ? "One or more mission steps failed; see evidence and timeline." : "Mission ended with incomplete steps.";
       await this.emit(id, mission.status === "completed" ? "mission.completed" : "mission.failed", { result: mission.result, error: mission.error });
     } catch (error) {
-      mission.status = "failed"; mission.error = error instanceof Error ? error.message : String(error);
-      await this.emit(id, "mission.failed", { error: mission.error });
+      mission.status = "failed"; mission.error = error instanceof Error ? error.message : String(error); await this.emit(id, "mission.failed", { error: mission.error });
     }
     await this.persist(mission); return mission;
   }
@@ -75,8 +97,7 @@ export class MissionRuntime {
     const mission = await this.hydrate(id);
     for (const step of mission.plan) if (step.status === "failed") step.status = "pending";
     mission.error = undefined; mission.result = undefined; mission.synthesis = undefined;
-    await this.emit(id, "mission.retrying", { failedStepsReset: true }); await this.persist(mission);
-    return this.run(id, workspace);
+    await this.emit(id, "mission.retrying", { failedStepsReset: true }); await this.persist(mission); return this.run(id, workspace);
   }
 
   private async runStep(mission: Mission, step: MissionStep, workspace: string): Promise<unknown> {
@@ -93,8 +114,7 @@ export class MissionRuntime {
   private async runTool(mission: Mission, step: MissionStep, toolName: string, input: unknown, workspace: string): Promise<unknown> {
     const tool = this.tools.get(toolName);
     if (tool.requiresApproval && !this.approved.has(mission.id) && process.env.ASHAI_ALLOW_MUTATIONS !== "true") {
-      mission.status = "waiting_approval"; await this.emit(mission.id, "approval.required", { stepId: step.id, tool: tool.name, input });
-      throw new Error(`Approval required for tool: ${tool.name}`);
+      mission.status = "waiting_approval"; await this.emit(mission.id, "approval.required", { stepId: step.id, tool: tool.name, input }); throw new Error(`Approval required for tool: ${tool.name}`);
     }
     await this.emit(mission.id, "tool.called", { stepId: step.id, tool: tool.name, input });
     const output = await tool.execute(input, { missionId: mission.id, workspace });
@@ -105,21 +125,19 @@ export class MissionRuntime {
     const limited: Record<string, unknown> = {}; let remaining = 28000;
     for (const [stepId, result] of Object.entries(results)) {
       if (remaining <= 0) { limited[stepId] = { omitted: true, reason: "context limit" }; continue; }
-      const text = typeof result === "string" ? result : JSON.stringify(result) ?? String(result);
-      const slice = text.slice(0, Math.min(7000, remaining));
+      const text = typeof result === "string" ? result : JSON.stringify(result) ?? String(result); const slice = text.slice(0, Math.min(7000, remaining));
       limited[stepId] = text.length > slice.length ? `${slice}\n[truncated]` : result; remaining -= slice.length;
     }
     return limited;
   }
 
   private cleanSynthesis(synthesis: MissionSynthesis): MissionSynthesis {
-    const unique = (items: string[]) => [...new Set(items.map(item => item.trim()).filter(Boolean))].slice(0, 20);
+    const unique = (items: string[]) => [...new Set(items.map(item => item.trim()).filter(Boolean))].slice(0, 12);
     return { summary: synthesis.summary.trim(), findings: unique(synthesis.findings), recommendations: unique(synthesis.recommendations), nextAction: synthesis.nextAction.trim() };
   }
 
   private fallbackSynthesis(mission: Mission): MissionSynthesis {
-    const completed = mission.plan.filter(s => s.status === "completed").length;
-    const failed = mission.plan.filter(s => s.status === "failed").length;
+    const completed = mission.plan.filter(s => s.status === "completed").length; const failed = mission.plan.filter(s => s.status === "failed").length;
     return { summary: `${completed}/${mission.plan.length} planned steps completed.`, findings: mission.plan.map(s => `${s.title}: ${s.status}.`), recommendations: failed ? ["Retry the failed steps after reviewing their evidence."] : [], nextAction: failed ? "Review failed steps and retry the mission." : "Mission complete." };
   }
 
