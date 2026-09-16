@@ -60,10 +60,10 @@ export class MissionRuntime {
         if (!step || step.status === "completed") continue;
         try { step.attempts = (step.attempts ?? 0) + 1; toolResults[step.id] = await this.runStep(mission, step, workspace); executed += 1; }
         catch (error) {
-          if (mission.status === "waiting_approval") { await this.persist(mission); return mission; }
+          if (this.getMission(id).status === "waiting_approval") { await this.persist(mission); return mission; }
           toolResults[step.id] = { error: error instanceof Error ? error.message : String(error), status: "failed" }; executed += 1;
         }
-        if (this.provider && process.env.ASHAI_AGENT_LOOP !== "false" && mission.status === "running") {
+        if (this.provider && process.env.ASHAI_AGENT_LOOP !== "false" && this.getMission(id).status === "running") {
           const decision = await this.provider.decide({ goal: mission.goal, step, toolResult: toolResults[step.id] });
           await this.emit(id, "agent.decision", { stepId: step.id, decision });
           if (decision.action === "ask_approval") { mission.status = "waiting_approval"; await this.persist(mission); return mission; }
