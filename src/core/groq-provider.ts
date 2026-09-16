@@ -1,13 +1,8 @@
 import type { ModelProvider } from "./model-provider.js";
 import type { MissionStep } from "./types.js";
 
-interface GroqProviderOptions {
-  apiKey?: string;
-  baseUrl?: string;
-  model?: string;
-}
+interface GroqProviderOptions { apiKey?: string; baseUrl?: string; model?: string; }
 
-/** Minimal Groq/OpenAI-compatible provider. The key is read from the environment and never persisted. */
 export class GroqProvider implements ModelProvider {
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -24,25 +19,24 @@ export class GroqProvider implements ModelProvider {
     const system = [
       "You are AshAI's mission planner.",
       "Create a concise executable plan for the user's goal.",
-      "Return ONLY a JSON object in this exact shape: {\"steps\":[{\"id\":\"...\",\"title\":\"...\",\"description\":\"...\",\"tool\":\"workspace.inspect|workspace.execute|workspace.verify\"}]}.",
-      "Do not call tools, do not use tool syntax, and do not output markdown.",
-      "Available tools: workspace.inspect, workspace.execute, workspace.verify.",
+      "Return ONLY JSON: {\"steps\":[{\"id\":\"...\",\"title\":\"...\",\"description\":\"...\",\"tool\":\"workspace.inspect|workspace.read_file|workspace.execute|workspace.verify|workspace.write_file\"}]}.",
+      "Do not call tools, use tool syntax, or output markdown.",
+      "Prefer inspect/read before execute/write. Use write_file only when the goal explicitly requires changing files.",
     ].join(" ");
-    const text = await this.chat(system, goal);
-    const parsed: unknown = JSON.parse(text);
-    if (!parsed || typeof parsed !== "object") throw new Error("Groq planner returned an invalid plan object.");
-    const steps = (parsed as Record<string, unknown>).steps;
+    const parsed = JSON.parse(await this.chat(system, goal)) as Record<string, unknown>;
+    const steps = parsed.steps;
     if (!Array.isArray(steps)) throw new Error("Groq planner returned no steps array.");
     return steps.map((item, index) => {
       if (!item || typeof item !== "object") throw new Error(`Invalid plan step ${index}.`);
       const value = item as Record<string, unknown>;
+      const allowed = new Set(["workspace.inspect", "workspace.read_file", "workspace.execute", "workspace.verify", "workspace.write_file"]);
       return {
         id: typeof value.id === "string" ? value.id : `step-${index + 1}`,
         title: typeof value.title === "string" ? value.title : `Step ${index + 1}`,
         description: typeof value.description === "string" ? value.description : goal,
         status: "pending" as const,
-        tool: value.tool === "workspace.inspect" || value.tool === "workspace.execute" || value.tool === "workspace.verify" ? value.tool : undefined,
-        requiresApproval: false,
+        tool: typeof value.tool === "string" && allowed.has(value.tool) ? value.tool : undefined,
+        requiresApproval: value.tool === "workspace.write_file",
       };
     });
   }
@@ -50,29 +44,26 @@ export class GroqProvider implements ModelProvider {
   async decide(input: { goal: string; step: MissionStep; toolResult?: unknown }) {
     const system = [
       "You are AshAI's execution controller.",
-      "Choose the next action for the current mission step.",
-      "Return ONLY JSON in this exact shape: {\"action\":\"call_tool|complete|ask_approval\",\"tool\":\"optional tool\",\"input\":{},\"summary\":\"...\"}.",
-      "Do not call tools, do not use tool syntax, and do not output markdown.",
-      "Never invent tools. Available tools: workspace.inspect, workspace.execute, workspace.verify.",
+      "Inspect the current tool result and decide the next useful action.",
+      "Return ONLY JSON: {\"action\":\"call_tool|complete|ask_approval\",\"tool\":\"optional tool\",\"input\":{},\"summary\":\"...\"}.",
+      "Never invent tools. Available tools: workspace.inspect, workspace.read_file, workspace.execute, workspace.verify, workspace.write_file.",
+      "Use workspace.read_file to inspect source. Use workspace.execute for safe development commands. Use workspace.write_file only for requested code changes; if a write is needed, return ask_approval unless mutation is explicitly enabled by the runtime.",
+      "Do not call tools or output markdown.",
     ].join(" ");
-    const text = await this.chat(system, JSON.stringify(input));
-    return JSON.parse(text) as { action: "call_tool" | "complete" | "ask_approval"; tool?: string; input?: unknown; summary?: string };
+    const decision = JSON.parse(await this.chat(system, JSON.stringify(input))) as Record<string, unknown>;
+    return {
+      action: decision.action as "call_tool" | "complete" | "ask_approval",
+      tool: typeof decision.tool === "string" ? decision.tool : undefined,
+      input: decision.input,
+      summary: typeof decision.summary === "string" ? decision.summary : undefined,
+    };
   }
 
   private async chat(system: string, user: string): Promise<string> {
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
-      body: JSON.stringify({
-        model: this.model,
-        temperature: 0.1,
-        tool_choice: "none",
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-      }),
+      body: JSON.stringify({ model: this.model, temperature: 0.1, tool_choice: "none", response_format: { type: "json_object" }, messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
     });
     if (!response.ok) throw new Error(`Groq request failed (${response.status}): ${await response.text()}`);
     const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
