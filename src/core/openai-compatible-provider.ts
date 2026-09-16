@@ -1,5 +1,5 @@
 import type { AgentProvider, ModelProvider } from "./model-provider.js";
-import type { MissionStep } from "./types.js";
+import type { MissionSynthesis, MissionStep } from "./types.js";
 
 interface ChatResponse {
   choices?: Array<{ message?: { content?: string | null } }>;
@@ -29,6 +29,30 @@ export class OpenAICompatibleProvider implements ModelProvider {
         ...(value.tool ? { tool: String(value.tool) } : {}),
       };
     });
+  }
+
+  async synthesize(input: { goal: string; steps: MissionStep[]; toolResults: Record<string, unknown> }): Promise<MissionSynthesis> {
+    const prompt = [
+      "You are AshAI's final mission analyst.",
+      "Analyze only the supplied mission evidence and return ONLY valid JSON.",
+      "The JSON must contain: summary (string), findings (string array), recommendations (string array), nextAction (string).",
+      "Do not invent facts that are absent from the evidence.",
+      `MISSION EVIDENCE: ${JSON.stringify(input)}`,
+    ].join("\n");
+    const result = await this.chat(prompt);
+    const parsed = JSON.parse(result) as Record<string, unknown>;
+    if (typeof parsed.summary !== "string" || !Array.isArray(parsed.findings) || !Array.isArray(parsed.recommendations) || typeof parsed.nextAction !== "string") {
+      throw new Error("Model returned an invalid mission synthesis");
+    }
+    if (!parsed.findings.every(item => typeof item === "string") || !parsed.recommendations.every(item => typeof item === "string")) {
+      throw new Error("Model returned invalid synthesis arrays");
+    }
+    return {
+      summary: parsed.summary,
+      findings: parsed.findings as string[],
+      recommendations: parsed.recommendations as string[],
+      nextAction: parsed.nextAction,
+    };
   }
 
   async decide(input: Parameters<AgentProvider["decide"]>[0]) {
