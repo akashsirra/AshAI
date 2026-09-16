@@ -28,6 +28,7 @@ const server = createServer(async (req, res) => {
     const match = url.pathname.match(/^\/api\/missions\/([^/]+)(?:\/(events|approve|retry))?$/);
     if (match) {
       const id = match[1]; const action = match[2];
+      if (!id) return json(res, 400, { error: "Mission id is required" });
       if (req.method === "GET" && !action) return json(res, 200, { mission: await runtime.hydrate(id), events: runtime.getEvents(id) });
       if (req.method === "POST" && action === "approve") { await runtime.approve(id); return json(res, 200, await runtime.run(id)); }
       if (req.method === "POST" && action === "retry") return json(res, 200, await runtime.retry(id, process.env.ASHAI_WORKSPACE ?? process.cwd()));
