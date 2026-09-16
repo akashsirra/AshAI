@@ -26,16 +26,9 @@ function parseInput(raw: unknown, tool?: ToolName): unknown {
   if (raw && typeof raw === "object") return raw;
   if (typeof raw !== "string" || !raw.trim()) return defaultInput(tool);
   let value = raw.trim();
-  if (value.startsWith("```") && value.endsWith("```")) {
-    value = value.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
-  }
-  try {
-    let parsed: unknown = JSON.parse(value);
-    if (typeof parsed === "string") parsed = JSON.parse(parsed);
-    return parsed;
-  } catch {
-    return defaultInput(tool);
-  }
+  if (value.startsWith("```") && value.endsWith("```")) value = value.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  try { let parsed: unknown = JSON.parse(value); if (typeof parsed === "string") parsed = JSON.parse(parsed); return parsed; }
+  catch { return defaultInput(tool); }
 }
 
 export class GroqProvider implements ModelProvider {
@@ -67,8 +60,21 @@ export class GroqProvider implements ModelProvider {
   }
 
   private async chat(system: string, user: string, schema: Record<string, unknown>, schemaName: string): Promise<string> {
-    const response = await fetch(`${this.baseUrl}/chat/completions`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` }, body: JSON.stringify({ model: this.model, temperature: 0.1, reasoning_effort: "low", reasoning_format: "hidden", response_format: { type: "json_schema", json_schema: { name: schemaName, strict: true, schema } }, messages: [{ role: "user", content: `${system}\n\nINPUT:\n${user}` }] }) });
-    if (!response.ok) throw new Error(`Groq request failed (${response.status}): ${await response.text()}`);
-    const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> }; const content = payload.choices?.[0]?.message?.content; if (!content) throw new Error("Groq returned no message content."); return content.trim();
+    const maxAttempts = Math.max(1, Number(process.env.ASHAI_GROQ_RETRIES ?? 2));
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const response = await fetch(`${this.baseUrl}/chat/completions`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` }, body: JSON.stringify({ model: this.model, temperature: 0.1, reasoning_effort: "low", reasoning_format: "hidden", response_format: { type: "json_schema", json_schema: { name: schemaName, strict: true, schema } }, messages: [{ role: "user", content: `${system}\n\nINPUT:\n${user}` }] }) });
+      if (response.ok) {
+        const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+        const content = payload.choices?.[0]?.message?.content;
+        if (!content) throw new Error("Groq returned no message content.");
+        return content.trim();
+      }
+      const body = await response.text();
+      if (response.status !== 429 || attempt === maxAttempts - 1) throw new Error(`Groq request failed (${response.status}): ${body}`);
+      const retryAfter = Number(response.headers.get("retry-after") ?? "");
+      const waitSeconds = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : Math.min(30, 8 * (attempt + 1));
+      await new Promise(resolve => setTimeout(resolve, (waitSeconds + 1) * 1000));
+    }
+    throw new Error("Groq request retry loop exhausted.");
   }
 }
