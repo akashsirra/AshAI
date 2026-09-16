@@ -21,7 +21,30 @@ export const workspaceInspect: ToolDefinition = {
     const value = input && typeof input === "object" ? input as Record<string, unknown> : {};
     const requested = typeof value.path === "string" ? value.path : ".";
     const entries = await readdir(safePath(context.workspace, requested), { withFileTypes: true });
-    return entries.slice(0, 200).map((entry) => ({ name: entry.name, type: entry.isDirectory() ? "directory" : "file" }));
+    return entries.slice(0, 200).map(entry => ({ name: entry.name, type: entry.isDirectory() ? "directory" : "file" }));
+  },
+};
+
+export const workspaceFindFiles: ToolDefinition = {
+  name: "workspace.find_files",
+  description: "Recursively list workspace files so the agent can establish what actually exists.",
+  async execute(input, context) {
+    const value = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const requested = typeof value.path === "string" ? value.path : ".";
+    const max = Math.min(1000, Math.max(1, Number(value.max ?? 300)));
+    const root = safePath(context.workspace, requested);
+    const found: string[] = [];
+    const visit = async (dir: string, prefix: string): Promise<void> => {
+      if (found.length >= max) return;
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        if (found.length >= max) break;
+        if (["node_modules", ".git", ".next", "dist", ".ashai"].includes(entry.name)) continue;
+        const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) await visit(resolve(dir, entry.name), rel); else found.push(rel);
+      }
+    };
+    await visit(root, "");
+    return { path: requested, count: found.length, truncated: found.length >= max, files: found };
   },
 };
 
@@ -35,9 +58,33 @@ export const workspaceReadFile: ToolDefinition = {
   },
 };
 
+export const workspaceSearch: ToolDefinition = {
+  name: "workspace.search",
+  description: "Search tracked workspace text for an exact or regex pattern and return matching file/line evidence.",
+  async execute(input, context) {
+    const value = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const pattern = typeof value.pattern === "string" ? value.pattern : "";
+    if (!pattern) throw new Error("workspace.search requires pattern");
+    const regex = Boolean(value.regex);
+    const max = Math.min(200, Math.max(1, Number(value.max ?? 50)));
+    const flags = regex ? "i" : "ig";
+    const matcher = new RegExp(regex ? pattern : pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flags);
+    const files = (await workspaceFindFiles.execute({ max: 1000 }, context) as { files: string[] }).files;
+    const matches: Array<{ path: string; line: number; text: string }> = [];
+    for (const path of files) {
+      if (matches.length >= max) break;
+      try {
+        const text = await readFile(safePath(context.workspace, path), "utf8");
+        text.split(/\r?\n/).forEach((line, index) => { if (matches.length < max && matcher.test(line)) matches.push({ path, line: index + 1, text: line.slice(0, 500) }); matcher.lastIndex = 0; });
+      } catch { /* binary/unreadable files are skipped */ }
+    }
+    return { pattern, count: matches.length, truncated: matches.length >= max, matches };
+  },
+};
+
 export const workspaceWriteFile: ToolDefinition = {
   name: "workspace.write_file",
-  description: "Write a UTF-8 text file inside the mission workspace. Requires mutation approval.",
+  description: "Write a UTF-8 file inside the mission workspace. Requires mutation approval.",
   requiresApproval: true,
   async execute(input, context) {
     const value = input && typeof input === "object" ? input as Record<string, unknown> : {};
@@ -57,7 +104,7 @@ export const workspaceExecute: ToolDefinition = {
   async execute(input, context) {
     const value = input && typeof input === "object" ? input as Record<string, unknown> : {};
     const command = typeof value.command === "string" && value.command.trim() ? value.command.trim() : "git status --short";
-    const parts = command.match(/(?:[^\s\"]+|\"[^\"]*\")+/g)?.map((part) => part.replace(/^\"|\"$/g, "")) ?? [];
+    const parts = command.match(/(?:[^\s\"]+|\"[^\"]*\")+/g)?.map(part => part.replace(/^\"|\"$/g, "")) ?? [];
     const executable = parts[0];
     if (!executable || !SAFE_COMMANDS.has(executable)) throw new Error(`Command not allowlisted: ${executable ?? ""}`);
     const mutating = /(^|\s)(rm|mv|cp|mkdir|rmdir|touch|chmod|chown|git\s+(commit|push|reset|checkout|clean)|npm\s+(install|uninstall|publish))\b/.test(command);
