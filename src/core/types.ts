@@ -18,6 +18,7 @@ export interface MissionStep {
   description: string;
   status: StepStatus;
   tool?: string;
+  input?: unknown;
   requiresApproval?: boolean;
 }
 
