@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.ashai/
+.env
+.env.*
+!.env.example
