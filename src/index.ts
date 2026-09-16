@@ -1,5 +1,7 @@
 import "dotenv/config";
 import { GroqProvider } from "./core/groq-provider.js";
+import { GeminiProvider } from "./core/gemini-provider.js";
+import { ProviderRouter } from "./core/provider-router.js";
 import { MissionRuntime } from "./core/mission-runtime-v2.js";
 import { ToolRegistry } from "./core/tool-registry.js";
 import { workspaceExecute, workspaceFindFiles, workspaceInspect, workspaceReadFile, workspaceSearch, workspaceVerify, workspaceWriteFile } from "./tools/builtin.js";
@@ -7,7 +9,10 @@ import { workspaceExecute, workspaceFindFiles, workspaceInspect, workspaceReadFi
 const registry = new ToolRegistry();
 for (const tool of [workspaceInspect, workspaceFindFiles, workspaceSearch, workspaceReadFile, workspaceExecute, workspaceVerify, workspaceWriteFile]) registry.register(tool);
 
-const provider = process.env.ASHAI_API_KEY ? new GroqProvider() : undefined;
+const providers: Array<{ name: string; provider: GroqProvider | GeminiProvider }> = [];
+if (process.env.ASHAI_API_KEY) providers.push({ name: "Groq", provider: new GroqProvider() });
+if (process.env.ASHAI_GEMINI_API_KEY) providers.push({ name: "Gemini", provider: new GeminiProvider() });
+const provider = providers.length === 1 ? providers[0].provider : providers.length > 1 ? new ProviderRouter(providers) : undefined;
 const runtime = new MissionRuntime(registry, provider);
 const goal = process.argv.slice(2).join(" ").trim();
 
@@ -16,7 +21,7 @@ if (!goal) {
   console.log('\nUsage: npm run dev -- "Inspect this project and explain what should improve first"');
   console.log("\nRegistered tools:");
   for (const tool of registry.list()) console.log(`  - ${tool.name}: ${tool.description}${tool.requiresApproval ? " [approval]" : ""}`);
-  console.log(`\nPlanner: ${provider ? "Groq" : "deterministic fallback (set ASHAI_API_KEY to enable Groq)"}`);
+  console.log(`\nProviders: ${providers.length ? providers.map(p => p.name).join(" → ") : "deterministic fallback"}`);
   console.log(`Agent loop: ${process.env.ASHAI_AGENT_LOOP === "false" ? "disabled" : "enabled (bounded)"}`);
   console.log(`Mutations: ${process.env.ASHAI_ALLOW_MUTATIONS === "true" ? "enabled" : "disabled (approval required)"}`);
   process.exit(0);
