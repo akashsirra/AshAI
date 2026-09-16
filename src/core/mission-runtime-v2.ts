@@ -64,16 +64,22 @@ export class MissionRuntime {
           toolResults[step.id] = { error: error instanceof Error ? error.message : String(error), status: "failed" }; executed += 1;
         }
         if (this.provider && process.env.ASHAI_AGENT_LOOP !== "false" && this.getMission(id).status === "running") {
-          const decision = await this.provider.decide({ goal: mission.goal, step, toolResult: toolResults[step.id] });
-          await this.emit(id, "agent.decision", { stepId: step.id, decision });
-          if (decision.action === "ask_approval") { mission.status = "waiting_approval"; await this.persist(mission); return mission; }
-          if (decision.action === "call_tool" && decision.tool) {
-            const signature = `${decision.tool}:${JSON.stringify(decision.input ?? {})}`;
-            if (!signatures.has(signature)) {
-              signatures.add(signature);
-              mission.plan.splice(index + 1, 0, { id: `agent-${randomUUID()}`, title: decision.summary || `Agent follow-up: ${decision.tool}`, description: decision.summary || `Agent-selected follow-up using ${decision.tool}.`, status: "pending", tool: decision.tool, input: decision.input, requiresApproval: decision.tool === "workspace.write_file" });
-              await this.persist(mission);
+          try {
+            const decision = await this.provider.decide({ goal: mission.goal, step, toolResult: toolResults[step.id] });
+            await this.emit(id, "agent.decision", { stepId: step.id, decision });
+            if (decision.action === "ask_approval") { mission.status = "waiting_approval"; await this.persist(mission); return mission; }
+            if (decision.action === "call_tool" && decision.tool) {
+              const signature = `${decision.tool}:${JSON.stringify(decision.input ?? {})}`;
+              if (!signatures.has(signature)) {
+                signatures.add(signature);
+                mission.plan.splice(index + 1, 0, { id: `agent-${randomUUID()}`, title: decision.summary || `Agent follow-up: ${decision.tool}`, description: decision.summary || `Agent-selected follow-up using ${decision.tool}.`, status: "pending", tool: decision.tool, input: decision.input, requiresApproval: decision.tool === "workspace.write_file" });
+                await this.persist(mission);
+              }
             }
+          } catch (error) {
+            // A model-controller failure must not destroy evidence already collected.
+            // Continue with the deterministic plan; record the controller failure in the timeline.
+            await this.emit(id, "agent.decision", { stepId: step.id, error: error instanceof Error ? error.message : String(error), fallback: "continue_planned_steps" });
           }
         }
       }
