@@ -92,6 +92,8 @@ export class GroqProvider implements ModelProvider {
       "For workspace.write_file use input like {\"path\":\"src/file.ts\",\"content\":\"...\"}.",
       "Prefer inspect/read before execute/write.",
       "Use write_file only when the goal explicitly requires changing files.",
+      "For audits, reviews, or goals asking what should improve, gather evidence before judging: inspect the workspace, read relevant documentation and project configuration such as package.json, inspect CI/configuration files when present, inspect test files when present, and run the most relevant safe verification command.",
+      "Do not claim a capability is missing merely because you did not inspect the file or directory that would prove it.",
     ].join(" ");
     const parsed = JSON.parse(await this.chat(system, goal, plannerSchema, "mission_plan")) as Record<string, unknown>;
     const steps = parsed.steps;
@@ -115,16 +117,19 @@ export class GroqProvider implements ModelProvider {
   async synthesize(input: { goal: string; steps: MissionStep[]; toolResults: Record<string, unknown> }): Promise<MissionSynthesis> {
     const system = [
       "You are AshAI's mission analyst and final deliverable writer.",
-      "Analyze the completed mission using the goal, executed steps, and tool results.",
-      "Base findings only on the supplied evidence; do not invent files, errors, or test results.",
-      "Identify concrete improvements when the goal asks what should improve.",
+      "Analyze the completed mission using ONLY the supplied goal, executed steps, and tool results.",
+      "Every factual finding must be directly supported by supplied evidence.",
+      "Do not invent files, errors, test results, scripts, CI configuration, documentation, APIs, or missing features.",
+      "Never treat an uninspected file, directory, or capability as absent. If evidence is insufficient, say that it was not verified instead of claiming it is missing.",
+      "Distinguish observed facts from recommendations. Recommendations may propose work, but must not be presented as existing deficiencies unless evidence supports them.",
+      "When the goal asks what needs improvement, prioritize concrete, evidence-backed improvements over generic software-project advice.",
       "Keep findings and recommendations concise and actionable.",
       "Return only the requested structured JSON.",
     ].join(" ");
 
     const context = JSON.stringify({
       goal: input.goal,
-      steps: input.steps.map(({ id, title, description, status, tool }) => ({ id, title, description, status, tool })),
+      steps: input.steps.map(({ id, title, description, status, tool, input: stepInput }) => ({ id, title, description, status, tool, input: stepInput })),
       toolResults: input.toolResults,
     });
     const parsed = JSON.parse(await this.chat(system, context, synthesisSchema, "mission_synthesis")) as Record<string, unknown>;
