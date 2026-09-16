@@ -2,20 +2,24 @@ import { randomUUID } from "node:crypto";
 import { createPlan } from "./planner.js";
 import type { Event, Mission, MissionStep } from "./types.js";
 import { ToolRegistry } from "./tool-registry.js";
+import type { ModelProvider } from "./model-provider.js";
 
 export class MissionRuntime {
   private readonly missions = new Map<string, Mission>();
   private readonly events = new Map<string, Event[]>();
 
-  constructor(private readonly tools: ToolRegistry) {}
+  constructor(
+    private readonly tools: ToolRegistry,
+    private readonly provider?: ModelProvider,
+  ) {}
 
-  createMission(goal: string): Mission {
+  async createMission(goal: string): Promise<Mission> {
     const now = new Date().toISOString();
     const mission: Mission = {
       id: randomUUID(),
       goal,
       status: "planning",
-      plan: createPlan(goal),
+      plan: [],
       createdAt: now,
       updatedAt: now,
     };
@@ -23,7 +27,15 @@ export class MissionRuntime {
     this.missions.set(mission.id, mission);
     this.events.set(mission.id, []);
     this.emit(mission.id, "mission.created", { goal });
-    this.emit(mission.id, "plan.created", { steps: mission.plan.length });
+
+    mission.plan = this.provider ? await this.provider.plan(goal) : createPlan(goal);
+    if (mission.plan.length === 0) throw new Error("Mission planner returned an empty plan.");
+
+    this.emit(mission.id, "plan.created", {
+      steps: mission.plan.length,
+      planner: this.provider ? "model" : "deterministic",
+    });
+    this.touch(mission);
     return mission;
   }
 
@@ -73,7 +85,10 @@ export class MissionRuntime {
       }
 
       this.emit(mission.id, "tool.called", { stepId: step.id, tool: tool.name });
-      const output = await tool.execute({ goal: mission.goal }, { missionId: mission.id, workspace });
+      const output = await tool.execute(
+        { goal: mission.goal, step: step.description },
+        { missionId: mission.id, workspace },
+      );
       this.emit(mission.id, "tool.completed", { stepId: step.id, tool: tool.name, output });
     }
 
