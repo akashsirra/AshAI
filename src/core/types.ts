@@ -1,12 +1,4 @@
-export type MissionStatus =
-  | "queued"
-  | "planning"
-  | "running"
-  | "waiting_approval"
-  | "verifying"
-  | "completed"
-  | "failed";
-
+export type MissionStatus = "queued" | "planning" | "running" | "waiting_approval" | "verifying" | "completed" | "failed";
 export type StepStatus = "pending" | "running" | "completed" | "failed";
 
 export interface Mission {
@@ -29,10 +21,7 @@ export interface MissionStep {
   requiresApproval?: boolean;
 }
 
-export interface ToolContext {
-  missionId: string;
-  workspace: string;
-}
+export interface ToolContext { missionId: string; workspace: string; }
 
 export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   name: string;
@@ -50,6 +39,7 @@ export interface Event {
     | "step.started"
     | "tool.called"
     | "tool.completed"
+    | "agent.decision"
     | "approval.required"
     | "step.completed"
     | "mission.completed"
