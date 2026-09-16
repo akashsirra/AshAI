@@ -41,8 +41,16 @@ async function collectFiles(workspace: string, requested: string, max: number): 
 }
 
 export const workspaceInspect: ToolDefinition = {
-  name: "workspace.inspect", description: "Inspect files and directories in the mission workspace.",
-  async execute(input, context) { const value = objectInput(input); const requested = stringField(value, "path", "directory", "dir") ?? "."; const entries = await readdir(safePath(context.workspace, requested), { withFileTypes: true }); return entries.slice(0, 200).map(entry => ({ name: entry.name, type: entry.isDirectory() ? "directory" : "file" })); },
+  name: "workspace.inspect", description: "Inspect a file or directory in the mission workspace. File paths return metadata; directory paths return entries.",
+  async execute(input, context) {
+    const value = objectInput(input); const requested = stringField(value, "path", "file", "filePath", "directory", "dir") ?? "."; const target = safePath(context.workspace, requested);
+    let info;
+    try { info = await stat(target); } catch { throw new Error(`Path not found: ${requested}`); }
+    if (info.isFile()) return { path: requested, type: "file", size: info.size, modifiedAt: info.mtime.toISOString() };
+    if (!info.isDirectory()) return { path: requested, type: "other" };
+    const entries = await readdir(target, { withFileTypes: true });
+    return { path: requested, type: "directory", entries: entries.slice(0, 200).map(entry => ({ name: entry.name, type: entry.isDirectory() ? "directory" : "file" })) };
+  },
 };
 
 export const workspaceFindFiles: ToolDefinition = {
