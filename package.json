@@ -1,26 +1,19 @@
 {
   "name": "ashai",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Mission Engine: goal-driven AI agent runtime with tools, sessions, plans, and verification.",
+  "description": "Goal-driven AI mission engine with planning, execution, evidence, verification, approvals, persistence, artifacts and a control plane.",
   "type": "module",
   "scripts": {
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
+    "server": "tsx src/server.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "test": "tsx src/core/mission-runtime.test.ts",
     "test:smoke": "npm run build && node dist/index.js \"Inspect this workspace and verify the mission runtime works\""
   },
-  "engines": {
-    "node": ">=20"
-  },
-  "dependencies": {
-    "dotenv": "^16.4.7",
-    "zod": "^3.24.2"
-  },
-  "devDependencies": {
-    "@types/node": "^22.13.4",
-    "tsx": "^4.19.3",
-    "typescript": "^5.7.3"
-  }
+  "engines": { "node": ">=20" },
+  "dependencies": { "dotenv": "^16.4.7", "zod": "^3.24.2" },
+  "devDependencies": { "@types/node": "^22.13.4", "tsx": "^4.19.3", "typescript": "^5.7.3" }
 }
