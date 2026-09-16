@@ -41,19 +41,7 @@ export class MissionRuntime {
 
     try {
       for (const step of mission.plan) {
-        const output = await this.runStep(mission, step, workspace);
-        if (this.provider && output !== undefined) {
-          const decision = await this.provider.decide({ goal: mission.goal, step, toolResult: output });
-          this.emit(id, "agent.decision", { stepId: step.id, ...decision });
-          if (decision.action === "ask_approval") {
-            mission.status = "waiting_approval";
-            this.emit(id, "approval.required", { stepId: step.id, reason: decision.summary ?? "Model requested approval" });
-            return mission;
-          }
-          if (decision.action === "call_tool" && decision.tool) {
-            await this.runTool(mission, step, decision.tool, decision.input, workspace);
-          }
-        }
+        await this.runStep(mission, step, workspace);
       }
       mission.status = "completed";
       mission.result = `Mission completed: ${mission.goal}`;
