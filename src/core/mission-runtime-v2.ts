@@ -53,7 +53,9 @@ export class MissionRuntime {
     const toolResults: Record<string, unknown> = {};
     const signatures = new Set<string>();
     const maxSteps = Math.max(1, Number(process.env.ASHAI_MAX_AGENT_STEPS ?? 24));
+    const maxControllerCalls = Math.max(0, Number(process.env.ASHAI_MAX_CONTROLLER_CALLS ?? 4));
     let executed = 0;
+    let controllerCalls = 0;
     try {
       for (let index = 0; index < mission.plan.length && executed < maxSteps; index += 1) {
         const step = mission.plan[index];
@@ -63,9 +65,11 @@ export class MissionRuntime {
           if (this.getMission(id).status === "waiting_approval") { await this.persist(mission); return mission; }
           toolResults[step.id] = { error: error instanceof Error ? error.message : String(error), status: "failed" }; executed += 1;
         }
-        if (this.provider && process.env.ASHAI_AGENT_LOOP !== "false" && this.getMission(id).status === "running") {
+        const shouldConsultController = this.provider && process.env.ASHAI_AGENT_LOOP !== "false" && controllerCalls < maxControllerCalls && (step.status === "failed" || executed === 1 || executed % 3 === 0);
+        if (shouldConsultController && this.getMission(id).status === "running") {
+          controllerCalls += 1;
           try {
-            const decision = await this.provider.decide({ goal: mission.goal, step, toolResult: toolResults[step.id] });
+            const decision = await this.provider!.decide({ goal: mission.goal, step, toolResult: toolResults[step.id] });
             await this.emit(id, "agent.decision", { stepId: step.id, decision });
             if (decision.action === "ask_approval") { mission.status = "waiting_approval"; await this.persist(mission); return mission; }
             if (decision.action === "call_tool" && decision.tool) {
@@ -77,8 +81,6 @@ export class MissionRuntime {
               }
             }
           } catch (error) {
-            // A model-controller failure must not destroy evidence already collected.
-            // Continue with the deterministic plan; record the controller failure in the timeline.
             await this.emit(id, "agent.decision", { stepId: step.id, error: error instanceof Error ? error.message : String(error), fallback: "continue_planned_steps" });
           }
         }
@@ -86,12 +88,17 @@ export class MissionRuntime {
       if (executed >= maxSteps && mission.plan.some(step => step.status === "pending")) mission.error = `Agent step limit reached (${maxSteps}).`;
       mission.status = "verifying"; await this.persist(mission); await this.emit(id, "mission.verifying", { steps: mission.plan.length });
       mission.status = "synthesizing"; await this.persist(mission); await this.emit(id, "mission.synthesizing", { steps: mission.plan.length });
-      mission.synthesis = this.provider ? await this.provider.synthesize({ goal: mission.goal, steps: mission.plan, toolResults: this.limitToolResults(toolResults) }) : this.fallbackSynthesis(mission);
+      try {
+        mission.synthesis = this.provider ? await this.provider.synthesize({ goal: mission.goal, steps: mission.plan, toolResults: this.limitToolResults(toolResults) }) : this.fallbackSynthesis(mission);
+      } catch (error) {
+        mission.synthesis = this.fallbackSynthesis(mission);
+        await this.emit(id, "agent.decision", { phase: "synthesis", error: error instanceof Error ? error.message : String(error), fallback: "deterministic_synthesis" });
+      }
       mission.synthesis = this.cleanSynthesis(mission.synthesis); mission.result = this.formatSynthesis(mission.synthesis);
       await this.emit(id, "mission.synthesized", { synthesis: mission.synthesis });
       const incomplete = mission.plan.some(step => step.status === "pending" || step.status === "running"); const failed = mission.plan.some(step => step.status === "failed");
-      mission.status = failed || incomplete ? "failed" : "completed";
-      if (mission.status === "failed" && !mission.error) mission.error = failed ? "One or more mission steps failed; see evidence and timeline." : "Mission ended with incomplete steps.";
+      mission.status = incomplete ? "failed" : "completed";
+      if (failed && !mission.error) mission.error = `Completed with ${mission.plan.filter(step => step.status === "failed").length} recoverable step failure(s); see evidence and timeline.`;
       await this.emit(id, mission.status === "completed" ? "mission.completed" : "mission.failed", { result: mission.result, error: mission.error });
     } catch (error) {
       mission.status = "failed"; mission.error = error instanceof Error ? error.message : String(error); await this.emit(id, "mission.failed", { error: mission.error });
@@ -128,23 +135,23 @@ export class MissionRuntime {
   }
 
   private limitToolResults(results: Record<string, unknown>): Record<string, unknown> {
-    const limited: Record<string, unknown> = {}; let remaining = 28000;
+    const limited: Record<string, unknown> = {}; let remaining = 18000;
     for (const [stepId, result] of Object.entries(results)) {
       if (remaining <= 0) { limited[stepId] = { omitted: true, reason: "context limit" }; continue; }
-      const text = typeof result === "string" ? result : JSON.stringify(result) ?? String(result); const slice = text.slice(0, Math.min(7000, remaining));
+      const text = typeof result === "string" ? result : JSON.stringify(result) ?? String(result); const slice = text.slice(0, Math.min(5000, remaining));
       limited[stepId] = text.length > slice.length ? `${slice}\n[truncated]` : result; remaining -= slice.length;
     }
     return limited;
   }
 
   private cleanSynthesis(synthesis: MissionSynthesis): MissionSynthesis {
-    const unique = (items: string[]) => [...new Set(items.map(item => item.trim()).filter(Boolean))].slice(0, 12);
+    const unique = (items: string[]) => [...new Set(items.map(item => item.trim()).filter(Boolean))].slice(0, 10);
     return { summary: synthesis.summary.trim(), findings: unique(synthesis.findings), recommendations: unique(synthesis.recommendations), nextAction: synthesis.nextAction.trim() };
   }
 
   private fallbackSynthesis(mission: Mission): MissionSynthesis {
     const completed = mission.plan.filter(s => s.status === "completed").length; const failed = mission.plan.filter(s => s.status === "failed").length;
-    return { summary: `${completed}/${mission.plan.length} planned steps completed.`, findings: mission.plan.map(s => `${s.title}: ${s.status}.`), recommendations: failed ? ["Retry the failed steps after reviewing their evidence."] : [], nextAction: failed ? "Review failed steps and retry the mission." : "Mission complete." };
+    return { summary: `${completed}/${mission.plan.length} planned steps completed${failed ? `; ${failed} step(s) failed but execution continued.` : "."}`, findings: mission.plan.map(s => `${s.title}: ${s.status}.`), recommendations: failed ? ["Review failed-step evidence and retry only the affected work."] : [], nextAction: failed ? "Review the failed step evidence and retry the affected work." : "Mission complete." };
   }
 
   private formatSynthesis(s: MissionSynthesis): string { return [s.summary, "", "Findings:", ...s.findings.map(x => `- ${x}`), "", "Recommendations:", ...s.recommendations.map(x => `- ${x}`), "", `Next action: ${s.nextAction}`].join("\n"); }
