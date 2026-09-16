@@ -2,6 +2,7 @@ import { readFile, readdir, writeFile, stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { resolve, relative, isAbsolute, basename } from "node:path";
+import type { Dirent } from "node:fs";
 import type { ToolDefinition } from "../core/types.js";
 
 type InputObject = Record<string, unknown>;
@@ -26,7 +27,8 @@ async function collectFiles(workspace: string, requested: string, max: number): 
   const found: string[] = [];
   const visit = async (dir: string, prefix: string): Promise<void> => {
     if (found.length >= max) return;
-    let entries; try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    let entries: Dirent[];
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
       if (found.length >= max) break;
       if (["node_modules", ".git", ".next", "dist", ".ashai"].includes(entry.name)) continue;
@@ -63,7 +65,7 @@ export const workspaceReadFile: ToolDefinition = {
 export const workspaceSearch: ToolDefinition = {
   name: "workspace.search", description: "Search tracked workspace text for an exact or regex pattern and return matching file/line evidence.",
   async execute(input, context) {
-    const value = objectInput(input); const pattern = stringField(value, "pattern", "query", "search"); if (!pattern) throw new Error("workspace.search requires pattern"); const regex = Boolean(value.regex); const maxRaw = Number(value.max ?? value.limit ?? 50); const max = Math.min(200, Math.max(1, Number.isFinite(maxRaw) ? maxRaw : 50)); const flags = regex ? "i" : "ig"; const matcher = new RegExp(regex ? pattern : pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    const value = objectInput(input); const pattern = stringField(value, "pattern", "query", "search"); if (!pattern) throw new Error("workspace.search requires pattern"); const regex = Boolean(value.regex); const maxRaw = Number(value.max ?? value.limit ?? 50); const max = Math.min(200, Math.max(1, Number.isFinite(maxRaw) ? maxRaw : 50)); const flags = regex ? "i" : "ig"; const matcher = new RegExp(regex ? pattern : pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flags);
     const files = (await workspaceFindFiles.execute({ max: 1000 }, context) as { files: string[] }).files; const matches: Array<{ path: string; line: number; text: string }> = [];
     for (const path of files) { if (matches.length >= max) break; try { const text = await readFile(safePath(context.workspace, path), "utf8"); text.split(/\r?\n/).forEach((line, index) => { if (matches.length < max && matcher.test(line)) matches.push({ path, line: index + 1, text: line.slice(0, 500) }); matcher.lastIndex = 0; }); } catch { /* binary/unreadable files are skipped */ } }
     return { pattern, count: matches.length, truncated: matches.length >= max, matches };
