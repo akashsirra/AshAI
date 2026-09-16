@@ -12,7 +12,7 @@ for (const tool of [workspaceInspect, workspaceFindFiles, workspaceSearch, works
 const providers: Array<{ name: string; provider: GroqProvider | GeminiProvider }> = [];
 if (process.env.ASHAI_API_KEY) providers.push({ name: "Groq", provider: new GroqProvider() });
 if (process.env.ASHAI_GEMINI_API_KEY) providers.push({ name: "Gemini", provider: new GeminiProvider() });
-const provider = providers.length === 1 ? providers[0].provider : providers.length > 1 ? new ProviderRouter(providers) : undefined;
+const provider = providers.length === 1 ? providers[0]!.provider : providers.length > 1 ? new ProviderRouter(providers) : undefined;
 const runtime = new MissionRuntime(registry, provider);
 const goal = process.argv.slice(2).join(" ").trim();
 
