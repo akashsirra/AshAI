@@ -50,7 +50,7 @@ export class MissionRuntime {
         if (step.status === "completed") continue;
         try { toolResults[step.id] = await this.runStep(mission, step, workspace); }
         catch (error) {
-          if (mission.status === "waiting_approval") { await this.persist(mission); return mission; }
+          if (this.getMission(id).status === "waiting_approval") { await this.persist(mission); return mission; }
           toolResults[step.id] = { error: error instanceof Error ? error.message : String(error), status: "failed" };
           // Preserve evidence and continue so synthesis can explain the failure rather than hiding it.
         }
@@ -85,7 +85,8 @@ export class MissionRuntime {
       const output = step.tool ? await this.runTool(mission, step, step.tool, step.input ?? { goal: mission.goal, step: step.description }, workspace) : { completed: true, note: step.description };
       step.status = "completed"; await this.emit(mission.id, "step.completed", { stepId: step.id }); await this.persist(mission); return output;
     } catch (error) {
-      step.status = "failed"; await this.emit(mission.id, "step.failed", { stepId: step.id, error: error instanceof Error ? error.message : String(error) }); await this.persist(mission); throw error;
+      if (mission.status !== "waiting_approval") step.status = "failed";
+      await this.emit(mission.id, "step.failed", { stepId: step.id, error: error instanceof Error ? error.message : String(error) }); await this.persist(mission); throw error;
     }
   }
 
