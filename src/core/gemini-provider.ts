@@ -18,7 +18,7 @@ function geminiSchema(schema: unknown): unknown {
   for (const [key, value] of Object.entries(input)) {
     if (key === "additionalProperties") continue;
     if (key === "type" && Array.isArray(value)) {
-      const types = value.filter(v => typeof v === "string');
+      const types = value.filter(v => typeof v === "string") as string[];
       output.type = types.find(v => v !== "null") ?? "string";
       if (types.includes("null")) output.nullable = true;
       continue;
@@ -61,7 +61,7 @@ export class GeminiProvider implements ModelProvider {
   }
 
   async plan(goal: string): Promise<MissionStep[]> {
-    const system = ["You are AshAI's mission planner. Create a concise executable plan and return structured JSON only.", "For repository analysis, use workspace.find_files early so you know what exists; then read exact files and search targeted evidence.", "Use workspace.verify or workspace.execute for verification. For execute use {\"command\":\"npm run typecheck\"}; inspect {\"path\":\".\"}; find_files {\"path\":\".\",\"max\":300}; search {\"pattern\":\"...\"}.", "Use workspace.write_file only when the user explicitly requests changes. Never infer absence from lack of inspection.", "For every tool step, input is a JSON object encoded as a string. If you cannot provide valid JSON, use an empty string and AshAI will apply a safe tool default."] .join(" ");
+    const system = ["You are AshAI's mission planner. Create a concise executable plan and return structured JSON only.", "For repository analysis, use workspace.find_files early so you know what exists; then read exact files and search targeted evidence.", "Use workspace.verify or workspace.execute for verification. For execute use {\"command\":\"npm run typecheck\"}; inspect {\"path\":\".\"}; find_files {\"path\":\".\",\"max\":300}; search {\"pattern\":\"...\"}.", "Use workspace.write_file only when the user explicitly requests changes. Never infer absence from lack of inspection.", "For every tool step, input is a JSON object encoded as a string. If you cannot provide valid JSON, use an empty string and AshAI will apply a safe tool default."].join(" ");
     const parsed = JSON.parse(await this.chat(system, goal, plannerSchema)) as Record<string, unknown>;
     if (!Array.isArray(parsed.steps)) throw new Error("Gemini planner returned no steps array.");
     return parsed.steps.map((item, index) => { if (!item || typeof item !== "object") throw new Error(`Invalid plan step ${index}.`); const value = item as Record<string, unknown>; const tool = typeof value.tool === "string" && TOOL_NAMES.includes(value.tool as ToolName) ? value.tool as ToolName : undefined; return { id: typeof value.id === "string" ? value.id : `step-${index + 1}`, title: typeof value.title === "string" ? value.title : `Step ${index + 1}`, description: typeof value.description === "string" ? value.description : goal, status: "pending" as const, tool, input: parseInput(value.input, tool), requiresApproval: tool === "workspace.write_file" }; });
@@ -77,7 +77,7 @@ export class GeminiProvider implements ModelProvider {
   }
 
   async decide(input: { goal: string; step: MissionStep; toolResult?: unknown }): Promise<Awaited<ReturnType<ModelProvider["decide"]>>> {
-    const system = ["You are AshAI's bounded execution controller.", "Use call_tool only when another concrete evidence or verification action is useful; otherwise complete.", "Use ask_approval for mutations when approval is required.", "Return structured JSON only. For call_tool, input is a JSON object encoded as a string."] .join(" ");
+    const system = ["You are AshAI's bounded execution controller.", "Use call_tool only when another concrete evidence or verification action is useful; otherwise complete.", "Use ask_approval for mutations when approval is required.", "Return structured JSON only. For call_tool, input is a JSON object encoded as a string."].join(" ");
     const decision = JSON.parse(await this.chat(system, JSON.stringify(input), decisionSchema)) as Record<string, unknown>;
     const action = decision.action; if (action !== "call_tool" && action !== "complete" && action !== "ask_approval") throw new Error(`Gemini returned invalid agent action: ${String(action)}`);
     const tool = typeof decision.tool === "string" && TOOL_NAMES.includes(decision.tool as ToolName) ? decision.tool as ToolName : undefined;
@@ -85,11 +85,7 @@ export class GeminiProvider implements ModelProvider {
   }
 
   private async chat(system: string, user: string, schema: unknown): Promise<string> {
-    const response = await fetch(`${this.baseUrl}/models/${encodeURIComponent(this.model)}:generateContent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": this.apiKey },
-      body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents: [{ role: "user", parts: [{ text: user }] }], generationConfig: { responseMimeType: "application/json", responseSchema: geminiSchema(schema), temperature: 0.1 } })
-    });
+    const response = await fetch(`${this.baseUrl}/models/${encodeURIComponent(this.model)}:generateContent`, { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": this.apiKey }, body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents: [{ role: "user", parts: [{ text: user }] }], generationConfig: { responseMimeType: "application/json", responseSchema: geminiSchema(schema), temperature: 0.1 } }) });
     if (!response.ok) { const body = await response.text(); throw new Error(`Gemini request failed (${response.status}): ${body}`); }
     const payload = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
     const content = payload.candidates?.[0]?.content?.parts?.map(part => part.text ?? "").join("").trim();
