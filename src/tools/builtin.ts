@@ -20,8 +20,7 @@ export const workspaceInspect: ToolDefinition = {
   async execute(input, context) {
     const value = input && typeof input === "object" ? input as Record<string, unknown> : {};
     const requested = typeof value.path === "string" ? value.path : ".";
-    const target = safePath(context.workspace, requested);
-    const entries = await readdir(target, { withFileTypes: true });
+    const entries = await readdir(safePath(context.workspace, requested), { withFileTypes: true });
     return entries.slice(0, 200).map((entry) => ({ name: entry.name, type: entry.isDirectory() ? "directory" : "file" }));
   },
 };
@@ -31,8 +30,8 @@ export const workspaceReadFile: ToolDefinition = {
   description: "Read a UTF-8 text file inside the mission workspace.",
   async execute(input, context) {
     const value = input && typeof input === "object" ? input as Record<string, unknown> : {};
-    if (typeof value.path !== "string" || !value.path) throw new Error("workspace.read_file requires path");
-    return await readFile(safePath(context.workspace, value.path), "utf8");
+    const path = typeof value.path === "string" && value.path ? value.path : "README.md";
+    return await readFile(safePath(context.workspace, path), "utf8");
   },
 };
 
@@ -57,15 +56,19 @@ export const workspaceExecute: ToolDefinition = {
   description: "Execute an allowlisted local development command in the mission workspace. Mutating commands require approval.",
   async execute(input, context) {
     const value = input && typeof input === "object" ? input as Record<string, unknown> : {};
-    const command = typeof value.command === "string" ? value.command.trim() : "";
-    if (!command) throw new Error("workspace.execute requires command");
+    const command = typeof value.command === "string" && value.command.trim() ? value.command.trim() : "git status --short";
     const parts = command.match(/(?:[^\s\"]+|\"[^\"]*\")+/g)?.map((part) => part.replace(/^\"|\"$/g, "")) ?? [];
     const executable = parts[0];
     if (!executable || !SAFE_COMMANDS.has(executable)) throw new Error(`Command not allowlisted: ${executable ?? ""}`);
     const mutating = /(^|\s)(rm|mv|cp|mkdir|rmdir|touch|chmod|chown|git\s+(commit|push|reset|checkout|clean)|npm\s+(install|uninstall|publish))\b/.test(command);
     if (mutating) throw new Error(`Mutating command requires an explicit approval gate: ${command}`);
-    const { stdout, stderr } = await execFileAsync(executable, parts.slice(1), { cwd: context.workspace, timeout: 60_000, maxBuffer: 1024 * 1024, shell: false });
-    return { command, exitCode: 0, stdout, stderr };
+    try {
+      const { stdout, stderr } = await execFileAsync(executable, parts.slice(1), { cwd: context.workspace, timeout: 60_000, maxBuffer: 1024 * 1024, shell: false });
+      return { command, exitCode: 0, stdout, stderr };
+    } catch (error) {
+      const failure = error as { code?: number | string; stdout?: string; stderr?: string; message?: string };
+      return { command, exitCode: typeof failure.code === "number" ? failure.code : 1, stdout: failure.stdout ?? "", stderr: failure.stderr ?? failure.message ?? String(error) };
+    }
   },
 };
 
@@ -75,11 +78,7 @@ export const workspaceVerify: ToolDefinition = {
   async execute(input, context) {
     const value = input && typeof input === "object" ? input as Record<string, unknown> : {};
     const command = typeof value.command === "string" && value.command.trim() ? value.command.trim() : "npm run typecheck";
-    try {
-      const result = await workspaceExecute.execute({ command }, context);
-      return { verified: true, command, result };
-    } catch (error) {
-      return { verified: false, command, error: error instanceof Error ? error.message : String(error) };
-    }
+    const result = await workspaceExecute.execute({ command }, context) as { exitCode: number };
+    return { verified: result.exitCode === 0, command, result };
   },
 };
