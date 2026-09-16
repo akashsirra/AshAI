@@ -24,13 +24,16 @@ export class GroqProvider implements ModelProvider {
     const system = [
       "You are AshAI's mission planner.",
       "Create a concise executable plan for the user's goal.",
-      "Return ONLY valid JSON: an array of objects with id,title,description and optional tool.",
+      "Return ONLY a JSON object in this exact shape: {\"steps\":[{\"id\":\"...\",\"title\":\"...\",\"description\":\"...\",\"tool\":\"workspace.inspect|workspace.execute|workspace.verify\"}]}.",
+      "Do not call tools, do not use tool syntax, and do not output markdown.",
       "Available tools: workspace.inspect, workspace.execute, workspace.verify.",
     ].join(" ");
     const text = await this.chat(system, goal);
     const parsed: unknown = JSON.parse(text);
-    if (!Array.isArray(parsed)) throw new Error("Groq planner returned a non-array plan.");
-    return parsed.map((item, index) => {
+    if (!parsed || typeof parsed !== "object") throw new Error("Groq planner returned an invalid plan object.");
+    const steps = (parsed as Record<string, unknown>).steps;
+    if (!Array.isArray(steps)) throw new Error("Groq planner returned no steps array.");
+    return steps.map((item, index) => {
       if (!item || typeof item !== "object") throw new Error(`Invalid plan step ${index}.`);
       const value = item as Record<string, unknown>;
       return {
@@ -48,7 +51,8 @@ export class GroqProvider implements ModelProvider {
     const system = [
       "You are AshAI's execution controller.",
       "Choose the next action for the current mission step.",
-      "Return ONLY JSON with action (call_tool|complete|ask_approval), optional tool, input, summary.",
+      "Return ONLY JSON in this exact shape: {\"action\":\"call_tool|complete|ask_approval\",\"tool\":\"optional tool\",\"input\":{},\"summary\":\"...\"}.",
+      "Do not call tools, do not use tool syntax, and do not output markdown.",
       "Never invent tools. Available tools: workspace.inspect, workspace.execute, workspace.verify.",
     ].join(" ");
     const text = await this.chat(system, JSON.stringify(input));
@@ -59,7 +63,16 @@ export class GroqProvider implements ModelProvider {
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
-      body: JSON.stringify({ model: this.model, temperature: 0.1, messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
+      body: JSON.stringify({
+        model: this.model,
+        temperature: 0.1,
+        tool_choice: "none",
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+      }),
     });
     if (!response.ok) throw new Error(`Groq request failed (${response.status}): ${await response.text()}`);
     const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
