@@ -27,8 +27,9 @@ const plannerSchema = {
           title: { type: "string" },
           description: { type: "string" },
           tool: { type: ["string", "null"], enum: [...TOOL_NAMES, null] },
+          input: { type: "string" },
         },
-        required: ["id", "title", "description", "tool"],
+        required: ["id", "title", "description", "tool", "input"],
       },
     },
   },
@@ -47,6 +48,12 @@ const decisionSchema = {
   required: ["action", "tool", "input", "summary"],
 } as const;
 
+function parseInput(raw: unknown): unknown {
+  if (typeof raw !== "string" || !raw.trim()) return undefined;
+  try { return JSON.parse(raw); }
+  catch { throw new Error("Groq returned invalid tool input JSON."); }
+}
+
 export class GroqProvider implements ModelProvider {
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -64,6 +71,11 @@ export class GroqProvider implements ModelProvider {
       "You are AshAI's mission planner.",
       "Create a concise executable plan for the user's goal.",
       "Return the requested structured JSON only.",
+      "For every tool step, input must be a JSON object encoded as a string.",
+      "For workspace.read_file use input like {\"path\":\"README.md\"}.",
+      "For workspace.execute or workspace.verify use input like {\"command\":\"npm run typecheck\"}.",
+      "For workspace.inspect use input like {\"path\":\".\"}.",
+      "For workspace.write_file use input like {\"path\":\"src/file.ts\",\"content\":\"...\"}.",
       "Prefer inspect/read before execute/write.",
       "Use write_file only when the goal explicitly requires changing files.",
     ].join(" ");
@@ -80,6 +92,7 @@ export class GroqProvider implements ModelProvider {
         description: typeof value.description === "string" ? value.description : goal,
         status: "pending" as const,
         tool,
+        input: parseInput(value.input),
         requiresApproval: tool === "workspace.write_file",
       };
     });
@@ -90,6 +103,7 @@ export class GroqProvider implements ModelProvider {
       "You are AshAI's execution controller.",
       "Inspect the current tool result and decide the next useful action.",
       "Return only the requested structured JSON.",
+      "If action is call_tool, input must be a JSON object encoded as a string.",
       "Use workspace.read_file to inspect source.",
       "Use workspace.execute for safe development commands.",
       "Use workspace.write_file only for requested code changes.",
@@ -105,15 +119,10 @@ export class GroqProvider implements ModelProvider {
     const tool = typeof decision.tool === "string" && TOOL_NAMES.includes(decision.tool as ToolName)
       ? decision.tool as ToolName
       : undefined;
-    let parsedInput: unknown = undefined;
-    if (typeof decision.input === "string" && decision.input.trim()) {
-      try { parsedInput = JSON.parse(decision.input); }
-      catch { throw new Error("Groq agent decision contained invalid input JSON."); }
-    }
     return {
       action,
       tool,
-      input: parsedInput,
+      input: parseInput(decision.input),
       summary: typeof decision.summary === "string" ? decision.summary : undefined,
     };
   }
