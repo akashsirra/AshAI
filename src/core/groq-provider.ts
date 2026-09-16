@@ -3,6 +3,50 @@ import type { MissionStep } from "./types.js";
 
 interface GroqProviderOptions { apiKey?: string; baseUrl?: string; model?: string; }
 
+const TOOL_NAMES = [
+  "workspace.inspect",
+  "workspace.read_file",
+  "workspace.execute",
+  "workspace.verify",
+  "workspace.write_file",
+] as const;
+
+type ToolName = (typeof TOOL_NAMES)[number];
+
+const plannerSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    steps: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          title: { type: "string" },
+          description: { type: "string" },
+          tool: { type: ["string", "null"], enum: [...TOOL_NAMES, null] },
+        },
+        required: ["id", "title", "description", "tool"],
+      },
+    },
+  },
+  required: ["steps"],
+} as const;
+
+const decisionSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    action: { type: "string", enum: ["call_tool", "complete", "ask_approval"] },
+    tool: { type: ["string", "null"], enum: [...TOOL_NAMES, null] },
+    input: { type: "string" },
+    summary: { type: "string" },
+  },
+  required: ["action", "tool", "input", "summary"],
+} as const;
+
 export class GroqProvider implements ModelProvider {
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -19,24 +63,24 @@ export class GroqProvider implements ModelProvider {
     const system = [
       "You are AshAI's mission planner.",
       "Create a concise executable plan for the user's goal.",
-      "Return ONLY JSON: {\"steps\":[{\"id\":\"...\",\"title\":\"...\",\"description\":\"...\",\"tool\":\"workspace.inspect|workspace.read_file|workspace.execute|workspace.verify|workspace.write_file\"}]}.",
-      "Do not call tools, use tool syntax, or output markdown.",
-      "Prefer inspect/read before execute/write. Use write_file only when the goal explicitly requires changing files.",
+      "Return the requested structured JSON only.",
+      "Prefer inspect/read before execute/write.",
+      "Use write_file only when the goal explicitly requires changing files.",
     ].join(" ");
-    const parsed = JSON.parse(await this.chat(system, goal)) as Record<string, unknown>;
+    const parsed = JSON.parse(await this.chat(system, goal, plannerSchema, "mission_plan")) as Record<string, unknown>;
     const steps = parsed.steps;
     if (!Array.isArray(steps)) throw new Error("Groq planner returned no steps array.");
     return steps.map((item, index) => {
       if (!item || typeof item !== "object") throw new Error(`Invalid plan step ${index}.`);
       const value = item as Record<string, unknown>;
-      const allowed = new Set(["workspace.inspect", "workspace.read_file", "workspace.execute", "workspace.verify", "workspace.write_file"]);
+      const tool = typeof value.tool === "string" && TOOL_NAMES.includes(value.tool as ToolName) ? value.tool as ToolName : undefined;
       return {
         id: typeof value.id === "string" ? value.id : `step-${index + 1}`,
         title: typeof value.title === "string" ? value.title : `Step ${index + 1}`,
         description: typeof value.description === "string" ? value.description : goal,
         status: "pending" as const,
-        tool: typeof value.tool === "string" && allowed.has(value.tool) ? value.tool : undefined,
-        requiresApproval: value.tool === "workspace.write_file",
+        tool,
+        requiresApproval: tool === "workspace.write_file",
       };
     });
   }
@@ -45,25 +89,47 @@ export class GroqProvider implements ModelProvider {
     const system = [
       "You are AshAI's execution controller.",
       "Inspect the current tool result and decide the next useful action.",
-      "Return ONLY JSON: {\"action\":\"call_tool|complete|ask_approval\",\"tool\":\"optional tool\",\"input\":{},\"summary\":\"...\"}.",
-      "Never invent tools. Available tools: workspace.inspect, workspace.read_file, workspace.execute, workspace.verify, workspace.write_file.",
-      "Use workspace.read_file to inspect source. Use workspace.execute for safe development commands. Use workspace.write_file only for requested code changes; if a write is needed, return ask_approval unless mutation is explicitly enabled by the runtime.",
-      "Do not call tools or output markdown.",
+      "Return only the requested structured JSON.",
+      "Use workspace.read_file to inspect source.",
+      "Use workspace.execute for safe development commands.",
+      "Use workspace.write_file only for requested code changes.",
+      "If a write is needed and mutation is not explicitly enabled, return ask_approval.",
+      "If no further action is needed for this step, return complete.",
     ].join(" ");
-    const decision = JSON.parse(await this.chat(system, JSON.stringify(input))) as Record<string, unknown>;
+    const raw = await this.chat(system, JSON.stringify(input), decisionSchema, "agent_decision");
+    const decision = JSON.parse(raw) as Record<string, unknown>;
+    const action = decision.action;
+    if (action !== "call_tool" && action !== "complete" && action !== "ask_approval") {
+      throw new Error(`Groq returned invalid agent action: ${String(action)}`);
+    }
+    const tool = typeof decision.tool === "string" && TOOL_NAMES.includes(decision.tool as ToolName)
+      ? decision.tool as ToolName
+      : undefined;
+    let parsedInput: unknown = undefined;
+    if (typeof decision.input === "string" && decision.input.trim()) {
+      try { parsedInput = JSON.parse(decision.input); }
+      catch { throw new Error("Groq agent decision contained invalid input JSON."); }
+    }
     return {
-      action: decision.action as "call_tool" | "complete" | "ask_approval",
-      tool: typeof decision.tool === "string" ? decision.tool : undefined,
-      input: decision.input,
+      action,
+      tool,
+      input: parsedInput,
       summary: typeof decision.summary === "string" ? decision.summary : undefined,
     };
   }
 
-  private async chat(system: string, user: string): Promise<string> {
+  private async chat(system: string, user: string, schema: Record<string, unknown>, schemaName: string): Promise<string> {
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
-      body: JSON.stringify({ model: this.model, temperature: 0.1, tool_choice: "none", response_format: { type: "json_object" }, messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
+      body: JSON.stringify({
+        model: this.model,
+        temperature: 0.1,
+        reasoning_effort: "low",
+        reasoning_format: "hidden",
+        response_format: { type: "json_schema", json_schema: { name: schemaName, strict: true, schema } },
+        messages: [{ role: "user", content: `${system}\n\nUSER REQUEST:\n${user}` }],
+      }),
     });
     if (!response.ok) throw new Error(`Groq request failed (${response.status}): ${await response.text()}`);
     const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
