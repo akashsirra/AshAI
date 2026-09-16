@@ -1,5 +1,5 @@
 import type { ModelProvider } from "./model-provider.js";
-import type { MissionStep } from "./types.js";
+import type { MissionSynthesis, MissionStep } from "./types.js";
 
 interface GroqProviderOptions { apiKey?: string; baseUrl?: string; model?: string; }
 
@@ -48,6 +48,18 @@ const decisionSchema = {
     summary: { type: "string" },
   },
   required: ["action", "tool", "input", "summary"],
+} as const;
+
+const synthesisSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    summary: { type: "string" },
+    findings: { type: "array", items: { type: "string" } },
+    recommendations: { type: "array", items: { type: "string" } },
+    nextAction: { type: "string" },
+  },
+  required: ["summary", "findings", "recommendations", "nextAction"],
 } as const;
 
 function parseInput(raw: unknown): unknown {
@@ -100,6 +112,42 @@ export class GroqProvider implements ModelProvider {
     });
   }
 
+  async synthesize(input: { goal: string; steps: MissionStep[]; toolResults: Record<string, unknown> }): Promise<MissionSynthesis> {
+    const system = [
+      "You are AshAI's mission analyst and final deliverable writer.",
+      "Analyze the completed mission using the goal, executed steps, and tool results.",
+      "Base findings only on the supplied evidence; do not invent files, errors, or test results.",
+      "Identify concrete improvements when the goal asks what should improve.",
+      "Keep findings and recommendations concise and actionable.",
+      "Return only the requested structured JSON.",
+    ].join(" ");
+
+    const context = JSON.stringify({
+      goal: input.goal,
+      steps: input.steps.map(({ id, title, description, status, tool }) => ({ id, title, description, status, tool })),
+      toolResults: input.toolResults,
+    });
+    const parsed = JSON.parse(await this.chat(system, context, synthesisSchema, "mission_synthesis")) as Record<string, unknown>;
+
+    const strings = (value: unknown, field: string): string[] => {
+      if (!Array.isArray(value) || !value.every(item => typeof item === "string")) {
+        throw new Error(`Groq synthesis returned invalid ${field}.`);
+      }
+      return value as string[];
+    };
+
+    if (typeof parsed.summary !== "string" || typeof parsed.nextAction !== "string") {
+      throw new Error("Groq synthesis returned an invalid summary or nextAction.");
+    }
+
+    return {
+      summary: parsed.summary,
+      findings: strings(parsed.findings, "findings"),
+      recommendations: strings(parsed.recommendations, "recommendations"),
+      nextAction: parsed.nextAction,
+    };
+  }
+
   async decide(input: { goal: string; step: MissionStep; toolResult?: unknown }): Promise<Awaited<ReturnType<ModelProvider["decide"]>>> {
     const system = [
       "You are AshAI's execution controller.",
@@ -139,7 +187,7 @@ export class GroqProvider implements ModelProvider {
         reasoning_effort: "low",
         reasoning_format: "hidden",
         response_format: { type: "json_schema", json_schema: { name: schemaName, strict: true, schema } },
-        messages: [{ role: "user", content: `${system}\n\nUSER REQUEST:\n${user}` }],
+        messages: [{ role: "user", content: `${system}\n\nINPUT:\n${user}` }],
       }),
     });
     if (!response.ok) throw new Error(`Groq request failed (${response.status}): ${await response.text()}`);
