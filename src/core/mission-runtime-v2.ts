@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createPlan } from "./planner.js";
-import type { Event, Mission, MissionStep } from "./types.js";
+import type { Event, Mission, MissionSynthesis, MissionStep } from "./types.js";
 import { ToolRegistry } from "./tool-registry.js";
 import type { ModelProvider } from "./model-provider.js";
 
@@ -37,14 +37,31 @@ export class MissionRuntime {
   async run(id: string, workspace = process.cwd()): Promise<Mission> {
     const mission = this.getMission(id);
     mission.status = "running";
+    mission.error = undefined;
     this.touch(mission);
+
+    const toolResults: Record<string, unknown> = {};
 
     try {
       for (const step of mission.plan) {
-        await this.runStep(mission, step, workspace);
+        toolResults[step.id] = await this.runStep(mission, step, workspace);
       }
+
+      mission.status = "synthesizing";
+      this.touch(mission);
+      this.emit(id, "mission.synthesizing", { steps: mission.plan.length });
+
+      mission.synthesis = this.provider
+        ? await this.provider.synthesize({
+            goal: mission.goal,
+            steps: mission.plan,
+            toolResults: this.limitToolResults(toolResults),
+          })
+        : this.fallbackSynthesis(mission, toolResults);
+
+      mission.result = this.formatSynthesis(mission.synthesis);
+      this.emit(id, "mission.synthesized", { synthesis: mission.synthesis });
       mission.status = "completed";
-      mission.result = `Mission completed: ${mission.goal}`;
       this.emit(id, "mission.completed", { result: mission.result });
     } catch (error) {
       mission.status = "failed";
@@ -58,13 +75,22 @@ export class MissionRuntime {
   private async runStep(mission: Mission, step: MissionStep, workspace: string): Promise<unknown> {
     step.status = "running";
     this.emit(mission.id, "step.started", { stepId: step.id, title: step.title });
-    let output: unknown;
-    if (step.tool) {
-      output = await this.runTool(mission, step, step.tool, step.input ?? { goal: mission.goal, step: step.description }, workspace);
+    try {
+      let output: unknown;
+      if (step.tool) {
+        output = await this.runTool(mission, step, step.tool, step.input ?? { goal: mission.goal, step: step.description }, workspace);
+      }
+      step.status = "completed";
+      this.emit(mission.id, "step.completed", { stepId: step.id });
+      return output;
+    } catch (error) {
+      step.status = "failed";
+      this.emit(mission.id, "mission.failed", {
+        error: error instanceof Error ? error.message : String(error),
+        stepId: step.id,
+      });
+      throw error;
     }
-    step.status = "completed";
-    this.emit(mission.id, "step.completed", { stepId: step.id });
-    return output;
   }
 
   private async runTool(mission: Mission, step: MissionStep, toolName: string, input: unknown, workspace: string): Promise<unknown> {
@@ -79,6 +105,53 @@ export class MissionRuntime {
     const output = await tool.execute(input, { missionId: mission.id, workspace });
     this.emit(mission.id, "tool.completed", { stepId: step.id, tool: tool.name, output });
     return output;
+  }
+
+  private limitToolResults(results: Record<string, unknown>): Record<string, unknown> {
+    const limited: Record<string, unknown> = {};
+    let remaining = 24000;
+    for (const [stepId, result] of Object.entries(results)) {
+      if (remaining <= 0) {
+        limited[stepId] = "[tool result omitted: synthesis context limit reached]";
+        continue;
+      }
+      const serialized = typeof result === "string" ? result : JSON.stringify(result);
+      const text = serialized ?? String(result);
+      const slice = text.slice(0, Math.min(6000, remaining));
+      limited[stepId] = text.length > slice.length ? `${slice}\n[truncated]` : result;
+      remaining -= slice.length;
+    }
+    return limited;
+  }
+
+  private fallbackSynthesis(mission: Mission, results: Record<string, unknown>): MissionSynthesis {
+    const completed = mission.plan.filter(step => step.status === "completed").length;
+    const failed = mission.plan.filter(step => step.status === "failed").length;
+    const findings = [
+      `${completed} of ${mission.plan.length} planned steps completed successfully.`,
+      ...mission.plan.filter(step => step.tool).map(step => `${step.title}: ${step.status}.`),
+    ];
+    if (failed > 0) findings.push(`${failed} step(s) failed; inspect the mission timeline for details.`);
+    return {
+      summary: `Mission execution finished for: ${mission.goal}`,
+      findings,
+      recommendations: ["Enable a model provider for evidence-based analysis of tool results."],
+      nextAction: "Review the collected tool results and act on the recommendations.",
+    };
+  }
+
+  private formatSynthesis(synthesis: MissionSynthesis): string {
+    return [
+      synthesis.summary,
+      "",
+      "Findings:",
+      ...synthesis.findings.map(item => `- ${item}`),
+      "",
+      "Recommendations:",
+      ...synthesis.recommendations.map(item => `- ${item}`),
+      "",
+      `Next action: ${synthesis.nextAction}`,
+    ].join("\n");
   }
 
   private touch(mission: Mission): void { mission.updatedAt = new Date().toISOString(); }
