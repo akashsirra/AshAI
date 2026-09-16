@@ -3,6 +3,8 @@ import type { MissionStep } from "./types.js";
 
 interface GroqProviderOptions { apiKey?: string; baseUrl?: string; model?: string; }
 
+type AgentAction = "call_tool" | "complete" | "ask_approval";
+
 const TOOL_NAMES = [
   "workspace.inspect",
   "workspace.read_file",
@@ -98,7 +100,7 @@ export class GroqProvider implements ModelProvider {
     });
   }
 
-  async decide(input: { goal: string; step: MissionStep; toolResult?: unknown }) {
+  async decide(input: { goal: string; step: MissionStep; toolResult?: unknown }): Promise<Awaited<ReturnType<ModelProvider["decide"]>>> {
     const system = [
       "You are AshAI's execution controller.",
       "Inspect the current tool result and decide the next useful action.",
@@ -120,7 +122,7 @@ export class GroqProvider implements ModelProvider {
       ? decision.tool as ToolName
       : undefined;
     return {
-      action,
+      action: action as AgentAction,
       tool,
       input: parseInput(decision.input),
       summary: typeof decision.summary === "string" ? decision.summary : undefined,
